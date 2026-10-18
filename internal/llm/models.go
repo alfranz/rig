@@ -6,16 +6,45 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 // ModelInfo is one entry of GET /models. We keep only the fields the picker shows.
 type ModelInfo struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	ContextLength int     `json:"context_length"`
-	Pricing       Pricing `json:"pricing"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	ContextLength       int      `json:"context_length"`
+	Pricing             Pricing  `json:"pricing"`
+	SupportedParameters []string `json:"supported_parameters"`
+	TopProvider         struct {
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+	} `json:"top_provider"`
+	Reasoning *struct {
+		SupportedEfforts []string `json:"supported_efforts"`
+		DefaultEffort    string   `json:"default_effort"`
+	} `json:"reasoning"` // nil when the model does not reason
+	Benchmarks struct {
+		// Artificial Analysis indexes, 0 to 100. Nil when they have not measured the model.
+		ArtificialAnalysis *struct {
+			Intelligence *float64 `json:"intelligence_index"`
+			Coding       *float64 `json:"coding_index"`
+			Agentic      *float64 `json:"agentic_index"`
+		} `json:"artificial_analysis"`
+	} `json:"benchmarks"`
+}
+
+// SupportsTools reports if the model accepts the "tools" array. rig cannot work without it.
+func (m ModelInfo) SupportsTools() bool { return slices.Contains(m.SupportedParameters, "tools") }
+
+// Intelligence is the Artificial Analysis intelligence index, or nil.
+func (m ModelInfo) Intelligence() *float64 {
+	if aa := m.Benchmarks.ArtificialAnalysis; aa != nil {
+		return aa.Intelligence
+	}
+	return nil
 }
 
 // Pricing is in US dollars per token. OpenRouter sends the numbers as strings, for example "0.000003".

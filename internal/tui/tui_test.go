@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -191,13 +192,26 @@ func TestUnknownAndExitCommands(t *testing.T) {
 	}
 }
 
-var testModels = []llm.ModelInfo{
-	{ID: "anthropic/claude-sonnet-5.5", Name: "Anthropic: Claude Sonnet 5.5", ContextLength: 1_000_000,
-		Pricing: llm.Pricing{Prompt: "0.000003", Completion: "0.000015"}},
-	{ID: "openai/gpt-6", Name: "OpenAI: GPT-6", ContextLength: 400_000,
-		Pricing: llm.Pricing{Prompt: "0.00000125", Completion: "0.00001"}},
-	{ID: "test/model", Name: "Test", ContextLength: 128_000, Pricing: llm.Pricing{Prompt: "0", Completion: "0"}},
-}
+// testModels is what GET /models returns, in OpenRouter's order.
+var testModels = func() []llm.ModelInfo {
+	var ms []llm.ModelInfo
+	err := json.Unmarshal([]byte(`[
+		{"id":"anthropic/claude-sonnet-5.5","name":"Anthropic: Claude Sonnet 5.5","context_length":1000000,
+		 "description":"Sonnet-class model for well-scoped everyday work. It is strong at building features, fixing bugs, and producing clean code in large repositories with many files and long histories. It follows instructions closely and keeps answers short unless you ask for more detail.",
+		 "pricing":{"prompt":"0.000002","completion":"0.00001"},"supported_parameters":["tools","reasoning"],
+		 "top_provider":{"max_completion_tokens":128000},"reasoning":{"supported_efforts":["high","low"],"default_effort":"high"},
+		 "benchmarks":{"artificial_analysis":{"intelligence_index":56,"coding_index":null,"agentic_index":null}}},
+		{"id":"openai/gpt-6","name":"OpenAI: GPT-6","context_length":400000,
+		 "pricing":{"prompt":"0.00000125","completion":"0.00001"},"supported_parameters":["tools"],
+		 "benchmarks":{"artificial_analysis":{"intelligence_index":52.7,"coding_index":76.9,"agentic_index":51}}},
+		{"id":"vision/no-tools","name":"No tools","context_length":32000,"pricing":{"prompt":"0","completion":"0"}},
+		{"id":"test/model","name":"Test","context_length":128000,"pricing":{"prompt":"0","completion":"0"},"supported_parameters":["tools"]}
+	]`), &ms)
+	if err != nil {
+		panic(err)
+	}
+	return ms
+}()
 
 func TestModelPicker(t *testing.T) {
 	for _, size := range [][2]int{{120, 40}, {80, 24}, {60, 15}} {
@@ -218,8 +232,15 @@ func TestModelPicker(t *testing.T) {
 		if ids := pickerIDs(m); strings.Join(ids, " ") != "openai/gpt-6 gone/model anthropic/claude-sonnet-5.5 test/model" {
 			t.Errorf("%v: order %v", size, ids)
 		}
-		if size[0] >= 80 && (!strings.Contains(v, "$3.00") || !strings.Contains(v, "1M") || !strings.Contains(v, "free")) {
-			t.Errorf("%v: picker missing price or context:\n%s", size, v)
+		if size[0] >= 80 && (!strings.Contains(v, "$2.00") || !strings.Contains(v, "1M") || !strings.Contains(v, "free") || !strings.Contains(v, "52.7")) {
+			t.Errorf("%v: picker missing price, context or score:\n%s", size, v)
+		}
+		if strings.Contains(v, "vision/no-tools") {
+			t.Errorf("%v: a model without tools is in the list:\n%s", size, v)
+		}
+		// The card shows the selected model, openai/gpt-6. A short terminal has no card.
+		if size[1] >= 16 && !strings.Contains(v, "intelligence 52.7 · coding 76.9 · agentic 51.0") {
+			t.Errorf("%v: card missing scores:\n%s", size, v)
 		}
 
 		typeText(m, "son 5.5") // every word must match
@@ -344,6 +365,66 @@ func TestUsageView(t *testing.T) {
 			if !strings.Contains(v, want) {
 				t.Errorf("%v: usage view missing %q:\n%s", size, want, v)
 			}
+		}
+	}
+}
+
+func TestModelPickerSortCardAndOpen(t *testing.T) {
+	m := testModel(t, 100, 30)
+	m.Update(modelsMsg{models: testModels})
+	m.Update(usedMsg{counts: map[string]int{"test/model": 7, "openai/gpt-6": 2}})
+	typeText(m, "/model")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	want := map[string]string{
+		"recent":       "anthropic/claude-sonnet-5.5 openai/gpt-6 test/model",
+		"most used":    "test/model openai/gpt-6 anthropic/claude-sonnet-5.5",
+		"intelligence": "anthropic/claude-sonnet-5.5 openai/gpt-6 test/model",
+		"price":        "test/model openai/gpt-6 anthropic/claude-sonnet-5.5",
+	}
+	for i := range sortNames {
+		if i > 0 {
+			m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		}
+		name := sortNames[m.picker.sort]
+		if got := strings.Join(pickerIDs(m), " "); got != want[name] {
+			t.Errorf("sort %s: %s, want %s", name, got, want[name])
+		}
+		v := checkFits(t, m)
+		if !strings.Contains(v, "sort: "+name) {
+			t.Errorf("sort %s: header missing:\n%s", name, v)
+		}
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.picker.sort != sortRecent {
+		t.Errorf("tab should wrap to recent, got %v", m.picker.sort)
+	}
+
+	// The card of the first model: description cut to two lines.
+	v := checkFits(t, m)
+	for _, want := range []string{"context 1M · max out 128k · reasoning: high (high, low)", "Sonnet-class model", "…"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("card missing %q:\n%s", want, v)
+		}
+	}
+
+	var opened string
+	openURL = func(url string) error { opened = url; return nil }
+	t.Cleanup(func() { openURL = nil })
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	if cmd == nil {
+		t.Fatal("ctrl+o returned no command")
+	}
+	cmd()
+	if opened != "https://openrouter.ai/anthropic/claude-sonnet-5.5" || m.picker == nil {
+		t.Errorf("opened %q, picker open %v", opened, m.picker != nil)
+	}
+}
+
+func TestShort(t *testing.T) {
+	for n, want := range map[int]string{950: "950", 44_123: "44k", 200_000: "200k", 1_000_000: "1M", 1_048_576: "1M", 1_500_000: "1.5M"} {
+		if got := short(n); got != want {
+			t.Errorf("short(%d) = %q, want %q", n, got, want)
 		}
 	}
 }

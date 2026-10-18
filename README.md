@@ -2,17 +2,14 @@
 
 # rig
 
-~3,200 lines of Go · no SDKs · every API call on screen
+A small, model-agnostic agent harness.
 
 </div>
 
 <br>
 
-rig is a small coding agent for the terminal. It talks to [OpenRouter](https://openrouter.ai) with
-plain `net/http` and server-sent events. The TUI shows each request, each raw stream line and each token.
-Nothing is hidden behind a library.
-
-I built it to learn how coding agents work. It is a personal project, so I do not take pull requests.
+rig runs in the terminal and works with any model on [OpenRouter](https://openrouter.ai).
+The TUI shows each request, each raw stream line and each token.
 
 ## Install
 
@@ -30,7 +27,7 @@ rig -raw "hello"           # one request: the JSON out, every raw line back
 ```
 
 | Flag | |
-|---|---|
+| --- | --- |
 | `-agent <name>` | agent file to use (default `general`) |
 | `-model <id>` | any OpenRouter model id; overrides `/model` and the agent file |
 | `-yolo` | run `bash` and `edit_file` without asking |
@@ -39,7 +36,7 @@ rig -raw "hello"           # one request: the JSON out, every raw line back
 ## Keys
 
 | | |
-|---|---|
+| --- | --- |
 | `enter` | send, or open the selected call |
 | `tab` | move between the input and the calls pane |
 | `↑ ↓` `j k` | select a call |
@@ -53,14 +50,15 @@ rig -raw "hello"           # one request: the JSON out, every raw line back
 Type `/` to open the menu.
 
 | | |
-|---|---|
-| `/model` | pick a model from the live OpenRouter list |
+| --- | --- |
+| `/model` | pick a model: benchmarks, prices, your usage; `tab` sorts, `ctrl+o` opens the model page |
 | `/context` | see what fills the context window |
 | `/usage` | cost per day and per model, from all logs |
 | `/clear` | start a new conversation |
 | `/exit` | quit |
 
-`/model` saves your pick in `~/.rig/state.json`, and the next start uses it.
+`/model` lists only models that support tool calls, because rig needs them.
+It saves your pick in `~/.rig/state.json`, and the next start uses it.
 `/context` measures against a 200k token "smart zone". Change it with `smart_zone_tokens` in the same file.
 
 ## Agents

@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -12,17 +16,46 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/alfranz/rig/internal/jsonl"
 	"github.com/alfranz/rig/internal/llm"
 	"github.com/alfranz/rig/internal/state"
 )
 
-// picker is the full screen /model view: a filter input over a list of models.
+// picker is the full screen /model view: a filter input, a list of models, and a card for the selected one.
 type picker struct {
 	filter textinput.Model
-	items  []llm.ModelInfo // recent models first, then all others, after the filter
+	sort   sortMode
+	items  []llm.ModelInfo // after filter and sort
 	sel    int
 	top    int // first visible row
 }
+
+type sortMode int
+
+const (
+	sortRecent sortMode = iota // your recent models, then OpenRouter's order (newest first)
+	sortUsed                   // your calls per model, from the logs
+	sortIntelligence
+	sortPrice
+)
+
+var sortNames = []string{"recent", "most used", "intelligence", "price"}
+
+// usedMsg has the number of calls per model in all logs.
+type usedMsg struct{ counts map[string]int }
+
+// openURL opens a link in the browser. Tests replace it.
+var openURL = func(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Run()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Run()
+	}
+	return exec.Command("xdg-open", url).Run()
+}
+
+func modelURL(id string) string { return "https://openrouter.ai/" + id }
 
 func (m *model) fetchModels() tea.Cmd {
 	m.modelsLoading = true
@@ -32,6 +65,19 @@ func (m *model) fetchModels() tea.Cmd {
 		defer cancel()
 		models, err := client.Models(ctx)
 		return modelsMsg{models, err}
+	}
+}
+
+// loadUsed counts calls per model once at startup. After that, CallFinished adds to the counts.
+func (m *model) loadUsed() tea.Cmd {
+	dir := filepath.Dir(m.opts.LogPath)
+	return func() tea.Msg {
+		u, _ := jsonl.Summarize(dir) // no counts is fine: the column shows "-"
+		counts := map[string]int{}
+		for _, t := range u.Models {
+			counts[t.Key] = t.Calls
+		}
+		return usedMsg{counts}
 	}
 }
 
@@ -59,7 +105,7 @@ func (m *model) errorEntry(text string) tea.Cmd {
 	return nil
 }
 
-// refresh builds the list again after the filter or the model list changed.
+// refresh builds the list again after the filter, the sort or the model list changed.
 func (p *picker) refresh(m *model) {
 	byID := map[string]llm.ModelInfo{}
 	for _, info := range m.models {
@@ -79,16 +125,55 @@ func (p *picker) refresh(m *model) {
 	// Recent models show even before the list arrives, so the picker works offline.
 	for _, id := range m.opts.State.RecentModels {
 		info, ok := byID[id]
+		if ok && !info.SupportsTools() {
+			continue
+		}
 		if !ok {
 			info = llm.ModelInfo{ID: id}
 		}
 		add(info)
 	}
 	for _, info := range m.models {
-		add(info)
+		if info.SupportsTools() {
+			add(info)
+		}
+	}
+
+	// SortStableFunc keeps the recent order for equal values. Models without a value go last.
+	switch p.sort {
+	case sortUsed:
+		slices.SortStableFunc(p.items, func(a, b llm.ModelInfo) int { return cmp.Compare(m.used[b.ID], m.used[a.ID]) })
+	case sortIntelligence:
+		slices.SortStableFunc(p.items, func(a, b llm.ModelInfo) int {
+			return cmp.Compare(deref(b.Intelligence(), -1), deref(a.Intelligence(), -1))
+		})
+	case sortPrice:
+		slices.SortStableFunc(p.items, func(a, b llm.ModelInfo) int {
+			pa, oka := llm.PerMillion(a.Pricing.Prompt)
+			pb, okb := llm.PerMillion(b.Pricing.Prompt)
+			return cmp.Or(compareBool(okb, oka), cmp.Compare(pa, pb))
+		})
 	}
 	p.sel = min(p.sel, max(len(p.items)-1, 0))
 	p.keepVisible(m.pickerRows())
+}
+
+func deref(f *float64, missing float64) float64 {
+	if f == nil {
+		return missing
+	}
+	return *f
+}
+
+// compareBool sorts false before true.
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 func (p *picker) move(d, rows int) {
@@ -103,8 +188,16 @@ func (p *picker) keepVisible(rows int) {
 	}
 }
 
-// pickerRows is the height of the list: the screen minus title, input, column header and footer.
-func (m *model) pickerRows() int { return max(m.height-4, 1) }
+// cardRows is the height of the card below the list. A short terminal drops the card and keeps the list.
+func (m *model) cardRows() int {
+	if m.height < 16 {
+		return 0
+	}
+	return 6
+}
+
+// pickerRows is the height of the list: the screen minus title, input, column header, card and footer.
+func (m *model) pickerRows() int { return max(m.height-4-m.cardRows(), 1) }
 
 func (m *model) pickerKey(k tea.KeyMsg) tea.Cmd {
 	p, rows := m.picker, m.pickerRows()
@@ -120,6 +213,21 @@ func (m *model) pickerKey(k tea.KeyMsg) tea.Cmd {
 		p.move(-rows, rows)
 	case "pgdown":
 		p.move(rows, rows)
+	case "tab":
+		p.sort = (p.sort + 1) % sortMode(len(sortNames))
+		p.sel, p.top = 0, 0
+		p.refresh(m)
+	case "ctrl+o":
+		if len(p.items) == 0 {
+			return nil
+		}
+		url := modelURL(p.items[p.sel].ID)
+		return func() tea.Msg {
+			if err := openURL(url); err != nil {
+				return errMsg{fmt.Errorf("open %s: %w", url, err)}
+			}
+			return nil
+		}
 	case "enter":
 		if len(p.items) == 0 {
 			return nil
@@ -164,25 +272,25 @@ func (m *model) setModel(id string) tea.Cmd {
 
 func (m *model) viewPicker() string {
 	p, w := m.picker, m.width
-	count := fmt.Sprintf("  %d models · recent first", len(p.items))
+	info := fmt.Sprintf("  %d with tools · sort: %s (tab)", len(p.items), sortNames[p.sort])
 	switch {
 	case m.modelsLoading:
-		count += " · loading the list from OpenRouter…"
+		info += " · loading the list from OpenRouter…"
 	case m.modelsErr != nil:
-		count += " · list failed: " + oneLine(m.modelsErr.Error())
+		info += " · list failed: " + oneLine(m.modelsErr.Error())
 	}
-	title := ansi.Truncate(titleStyle.Render(" Model")+dimStyle.Render(count), w, "…")
+	title := ansi.Truncate(titleStyle.Render(" Model")+dimStyle.Render(info), w, "…")
 
-	// Prices and context need room. On a narrow screen the id gets all of it.
-	wide := w >= 70
-	right := func(ctx, in, out string) string {
+	// The numbers need room. On a narrow screen the id gets all of it.
+	wide := w >= 76
+	right := func(ctx, iq, in, out, used string) string {
 		if !wide {
 			return ""
 		}
-		return fmt.Sprintf(" %8s %10s %10s ", ctx, in, out)
+		return fmt.Sprintf(" %5s %5s %8s %8s %5s ", ctx, iq, in, out, used)
 	}
-	idW := w - 3 - ansi.StringWidth(right("", "", ""))
-	header := dimStyle.Render("   " + padRight("model", idW) + right("context", "$/M in", "$/M out"))
+	idW := w - 3 - ansi.StringWidth(right("", "", "", "", ""))
+	header := dimStyle.Render("   " + padRight("model", idW) + right("ctx", "iq", "$/M in", "$/M out", "used"))
 
 	var rows []string
 	end := min(p.top+m.pickerRows(), len(p.items))
@@ -197,7 +305,11 @@ func (m *model) viewPicker() string {
 			ctx = short(info.ContextLength)
 			in, out = price(info.Pricing.Prompt), price(info.Pricing.Completion)
 		}
-		row := " " + mark + padRight(ansi.Truncate(info.ID, idW, "…"), idW) + right(ctx, in, out)
+		used := "-"
+		if n := m.used[info.ID]; n > 0 {
+			used = num(n)
+		}
+		row := " " + mark + padRight(ansi.Truncate(info.ID, idW, "…"), idW) + right(ctx, score(info.Intelligence()), in, out, used)
 		if i == p.sel {
 			row = selStyle.Render(row)
 		}
@@ -207,17 +319,78 @@ func (m *model) viewPicker() string {
 		rows = append(rows, dimStyle.Render("   no model matches"))
 	}
 	list := lipgloss.NewStyle().Height(m.pickerRows()).Render(strings.Join(rows, "\n"))
-	footer := dimStyle.Render(ansi.Truncate(" ↑ ↓ select · enter use · esc cancel · ● current model", w, ""))
-	return lipgloss.JoinVertical(lipgloss.Left, title, " "+p.filter.View(), header, list, footer)
+	footer := dimStyle.Render(ansi.Truncate(" ↑ ↓ select · enter use · tab sort · ctrl+o open page · esc cancel · ● current", w, ""))
+	parts := []string{title, " " + p.filter.View(), header, list}
+	if m.cardRows() > 0 {
+		parts = append(parts, m.viewCard())
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, append(parts, footer)...)
+}
+
+// viewCard shows the selected model: name, benchmarks, limits, and the start of the description.
+func (m *model) viewCard() string {
+	w := m.width
+	lines := []string{dimStyle.Render(strings.Repeat("─", w))}
+	p := m.picker
+	if len(p.items) == 0 {
+		return lipgloss.NewStyle().Height(m.cardRows()).Render(lines[0])
+	}
+	info := p.items[p.sel]
+	lines = append(lines, " "+titleStyle.Render(info.ID)+"  "+dimStyle.Render(info.Name))
+	if info.ContextLength == 0 {
+		lines = append(lines, dimStyle.Render(" Not in the OpenRouter list. It may be gone, or the list has not loaded yet."))
+		return lipgloss.NewStyle().Height(m.cardRows()).Render(fitLines(strings.Join(lines, "\n"), w))
+	}
+
+	if aa := info.Benchmarks.ArtificialAnalysis; aa != nil {
+		lines = append(lines, fmt.Sprintf(" intelligence %s · coding %s · agentic %s  %s",
+			score(aa.Intelligence), score(aa.Coding), score(aa.Agentic), dimStyle.Render("(Artificial Analysis)")))
+	} else {
+		lines = append(lines, dimStyle.Render(" no benchmark scores yet"))
+	}
+
+	limits := " context " + short(info.ContextLength)
+	if n := info.TopProvider.MaxCompletionTokens; n > 0 {
+		limits += " · max out " + short(n)
+	}
+	if r := info.Reasoning; r != nil {
+		limits += " · reasoning"
+		if r.DefaultEffort != "" {
+			limits += ": " + r.DefaultEffort
+		}
+		if len(r.SupportedEfforts) > 0 {
+			limits += " (" + strings.Join(r.SupportedEfforts, ", ") + ")"
+		}
+	} else {
+		limits += " · no reasoning"
+	}
+	lines = append(lines, limits)
+
+	// Two lines of description. ctrl+o opens the page with the rest.
+	desc := strings.Split(lipgloss.NewStyle().Width(max(w-2, 10)).Render(oneLine(info.Description)), "\n")
+	if len(desc) > 2 {
+		desc = desc[:2]
+		desc[1] = strings.TrimRight(desc[1], " ") + "…"
+	}
+	for _, d := range desc {
+		lines = append(lines, dimStyle.Render(" "+strings.TrimRight(d, " ")))
+	}
+	return lipgloss.NewStyle().Height(m.cardRows()).Render(fitLines(strings.Join(lines, "\n"), w))
+}
+
+func score(f *float64) string {
+	if f == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", *f)
 }
 
 // short formats a token count: 950, 44k, 200k, 1M, 1.5M.
 func short(n int) string {
 	switch {
-	case n >= 1_000_000 && n%1_000_000 == 0:
-		return fmt.Sprintf("%dM", n/1_000_000)
 	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+		// 1,048,576 and 1,000,000 both show as "1M".
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1e6), ".0") + "M"
 	case n >= 1000:
 		return fmt.Sprintf("%dk", (n+500)/1000)
 	}

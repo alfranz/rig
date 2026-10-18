@@ -67,7 +67,7 @@ func readCalls(path string, fn func(started time.Time, model string, u *llm.Usag
 		var r struct {
 			Type    string          `json:"type"`
 			Started time.Time       `json:"started"`
-			Model   string          `json:"model"`
+			Model   string          `json:"model"` // from the response
 			Request json.RawMessage `json:"request"`
 			Usage   *llm.Usage      `json:"usage"`
 		}
@@ -78,16 +78,13 @@ func readCalls(path string, fn func(started time.Time, model string, u *llm.Usag
 		if r.Type != "call" {
 			continue
 		}
-		model := r.Model
-		if model == "" {
-			// A failed call has no response model. Use the one we asked for.
-			var req struct {
-				Model string `json:"model"`
-			}
-			json.Unmarshal(r.Request, &req)
-			model = cmp.Or(req.Model, "(unknown)")
+		// Group by the model we asked for, so the counts match the ids in /model.
+		// The response can name another model, for example for "~anthropic/claude-sonnet-latest".
+		var req struct {
+			Model string `json:"model"`
 		}
-		fn(r.Started, model, r.Usage)
+		json.Unmarshal(r.Request, &req)
+		fn(r.Started, cmp.Or(req.Model, r.Model, "(unknown)"), r.Usage)
 	}
 }
 

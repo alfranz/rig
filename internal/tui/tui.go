@@ -147,6 +147,7 @@ type model struct {
 	models        []llm.ModelInfo // from GET /models, nil until it arrives
 	modelsErr     error
 	modelsLoading bool
+	used          map[string]int // calls per model id, for the "used" column and sort
 
 	busy       bool
 	cancelTurn context.CancelFunc
@@ -168,7 +169,7 @@ func newModel(sess *agent.Session, opts Options) *model {
 	m := &model{
 		sess: sess, opts: opts, modelID: sess.Agent.Model,
 		input: in, chat: viewport.New(0, 0), detailVP: viewport.New(0, 0), pageVP: viewport.New(0, 0),
-		curText: -1, curReasoning: -1, sel: -1, follow: true,
+		curText: -1, curReasoning: -1, sel: -1, follow: true, used: map[string]int{},
 	}
 	m.chat.MouseWheelEnabled = true
 	m.detailVP.MouseWheelEnabled = true
@@ -194,8 +195,8 @@ func instructionsLabel() string {
 	return "none (no AGENTS.md or CLAUDE.md)"
 }
 
-// Init loads the model list in the background, so /model and the context limit are ready when needed.
-func (m *model) Init() tea.Cmd { return tea.Batch(textinput.Blink, m.fetchModels()) }
+// Init loads the model list and the usage counts in the background, so /model and the context limit are ready when needed.
+func (m *model) Init() tea.Cmd { return tea.Batch(textinput.Blink, m.fetchModels(), m.loadUsed()) }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -217,6 +218,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.models, m.modelsErr, m.modelsLoading = msg.models, msg.err, false
 		if m.picker != nil {
 			m.picker.refresh(m)
+		}
+		return m, nil
+	case usedMsg:
+		for id, n := range msg.counts {
+			m.used[id] += n
 		}
 		return m, nil
 	case usageMsg:
@@ -256,6 +262,7 @@ func (m *model) handleEvent(e agent.Event) {
 		if c := m.call(e.CallID); c != nil {
 			c.res, c.err, c.done = e.Result, e.Err, true
 		}
+		m.used[m.modelID]++
 		if e.Result != nil && e.Result.Usage != nil {
 			u := e.Result.Usage
 			m.totalIn += u.PromptTokens

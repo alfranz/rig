@@ -119,7 +119,10 @@ func TestModels(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/models" {
 			t.Errorf("got %s %s", r.Method, r.URL.Path)
 		}
-		fmt.Fprint(w, `{"data":[{"id":"a/b","name":"A: B","context_length":200000,"pricing":{"prompt":"0.000003","completion":"0.000015"}},
+		fmt.Fprint(w, `{"data":[{"id":"a/b","name":"A: B","context_length":200000,"pricing":{"prompt":"0.000003","completion":"0.000015"},
+			"supported_parameters":["tools","reasoning"],"top_provider":{"max_completion_tokens":64000},
+			"reasoning":{"supported_efforts":["high","low"],"default_effort":"high"},
+			"benchmarks":{"artificial_analysis":{"intelligence_index":56,"coding_index":null}}},
 			{"id":"openrouter/auto","context_length":2000000,"pricing":{"prompt":"-1","completion":"-1"}}]}`)
 	}))
 	t.Cleanup(srv.Close)
@@ -133,6 +136,12 @@ func TestModels(t *testing.T) {
 	m := models[0]
 	if m.ID != "a/b" || m.ContextLength != 200000 {
 		t.Errorf("model = %+v", m)
+	}
+	if !m.SupportsTools() || models[1].SupportsTools() || m.TopProvider.MaxCompletionTokens != 64000 || m.Reasoning.DefaultEffort != "high" {
+		t.Errorf("model details = %+v", m)
+	}
+	if iq := m.Intelligence(); iq == nil || *iq != 56 || m.Benchmarks.ArtificialAnalysis.Coding != nil || models[1].Intelligence() != nil {
+		t.Errorf("benchmarks = %+v", m.Benchmarks)
 	}
 	if p, ok := PerMillion(m.Pricing.Prompt); !ok || p < 2.999 || p > 3.001 {
 		t.Errorf("prompt price = %v, %v", p, ok)

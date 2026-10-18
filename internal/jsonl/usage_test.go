@@ -1,6 +1,7 @@
 package jsonl
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,7 +20,8 @@ func TestSummarize(t *testing.T) {
 	day1 := time.Date(2026, 10, 17, 12, 0, 0, 0, time.Local)
 	day2 := day1.AddDate(0, 0, 1)
 	call := func(id int, at time.Time, model string, cost float64) {
-		l.Handle(agent.CallStarted{CallID: id, At: at, Request: []byte(`{"model":"asked/model"}`)})
+		asked := cmp.Or(model, "asked/model")
+		l.Handle(agent.CallStarted{CallID: id, At: at, Request: []byte(`{"model":"` + asked + `"}`)})
 		var res *llm.Result
 		if model != "" {
 			res = &llm.Result{Status: 200, Model: model, Usage: &llm.Usage{PromptTokens: 100, CompletionTokens: 10, Cost: cost}}
