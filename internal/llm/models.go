@@ -1,0 +1,59 @@
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+// ModelInfo is one entry of GET /models. We keep only the fields the picker shows.
+type ModelInfo struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	ContextLength int     `json:"context_length"`
+	Pricing       Pricing `json:"pricing"`
+}
+
+// Pricing is in US dollars per token. OpenRouter sends the numbers as strings, for example "0.000003".
+type Pricing struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+}
+
+// PerMillion turns a per-token price string into dollars per million tokens. ok is false for a missing or bad value.
+func PerMillion(price string) (v float64, ok bool) {
+	f, err := strconv.ParseFloat(price, 64)
+	if err != nil || f < 0 {
+		return 0, false // router models like openrouter/auto send "-1"
+	}
+	return f * 1e6, true
+}
+
+// Models lists the models OpenRouter offers. The endpoint needs no API key, but we send it anyway.
+func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openrouter models: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var body struct {
+		Data []ModelInfo `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	return body.Data, nil
+}

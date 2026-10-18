@@ -105,6 +105,13 @@ func (l *Logger) Handle(e agent.Event) {
 			Type string    `json:"type"` // "cleared"
 			Time time.Time `json:"time"`
 		}{"cleared", e.At})
+	case agent.ModelChanged:
+		l.enc.Encode(struct {
+			Type string    `json:"type"` // "model"
+			Time time.Time `json:"time"`
+			From string    `json:"from"`
+			To   string    `json:"to"`
+		}{"model", e.At, e.From, e.To})
 	case agent.ToolFinished:
 		l.enc.Encode(toolRecord{
 			Type: "tool", Time: time.Now(), ToolCallID: e.ToolCallID, Name: e.Name,

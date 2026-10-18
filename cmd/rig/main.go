@@ -18,6 +18,7 @@ import (
 	"github.com/alfranz/rig/internal/agent"
 	"github.com/alfranz/rig/internal/jsonl"
 	"github.com/alfranz/rig/internal/llm"
+	"github.com/alfranz/rig/internal/state"
 	"github.com/alfranz/rig/internal/tools"
 	"github.com/alfranz/rig/internal/tui"
 )
@@ -57,8 +58,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if *model != "" {
+	statePath := filepath.Join(home, ".rig", "state.json")
+	st, err := state.Load(statePath)
+	if err != nil {
+		return fmt.Errorf("%s: %w", statePath, err)
+	}
+	// The flag wins, then the model you picked last with /model, then the agent file.
+	switch {
+	case *model != "":
 		a.Model = *model
+	case len(st.RecentModels) > 0:
+		a.Model = st.RecentModels[0]
 	}
 	reg, err := tools.Default().Subset(a.Tools)
 	if err != nil {
@@ -88,7 +98,7 @@ func run() error {
 		}
 		return runPlain(ctx, sess, *prompt, logger.Path)
 	}
-	return tui.Run(sess, logger.Path, *yolo)
+	return tui.Run(sess, tui.Options{LogPath: logger.Path, Yolo: *yolo, StatePath: statePath, State: st})
 }
 
 // runRaw sends exactly one request and prints the wire traffic. Good for learning the format.

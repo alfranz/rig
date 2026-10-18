@@ -17,11 +17,20 @@ import (
 
 	"github.com/alfranz/rig/internal/agent"
 	"github.com/alfranz/rig/internal/llm"
+	"github.com/alfranz/rig/internal/state"
 )
 
+// Options are the settings from main.
+type Options struct {
+	LogPath   string
+	Yolo      bool
+	StatePath string      // ~/.rig/state.json
+	State     state.State // as loaded at startup; /model updates it
+}
+
 // Run starts the TUI. It wraps sess.Emit, so events go to the log and to the UI.
-func Run(sess *agent.Session, logPath string, yolo bool) error {
-	m := newModel(sess, logPath, yolo)
+func Run(sess *agent.Session, opts Options) error {
+	m := newModel(sess, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	logEvent := sess.Emit
@@ -30,7 +39,7 @@ func Run(sess *agent.Session, logPath string, yolo bool) error {
 		p.Send(e)
 	}
 	sess.Approve = nil
-	if !yolo {
+	if !opts.Yolo {
 		// The agent goroutine waits here until the user presses y or n in the UI.
 		sess.Approve = func(ctx context.Context, name, args string) bool {
 			reply := make(chan bool, 1)
@@ -51,6 +60,15 @@ type approvalMsg struct {
 	name, args string
 	reply      chan bool
 }
+
+// modelsMsg is the answer to GET /models.
+type modelsMsg struct {
+	models []llm.ModelInfo
+	err    error
+}
+
+// errMsg is an error from a command that ran outside Update.
+type errMsg struct{ err error }
 
 type entryKind int
 
@@ -93,9 +111,11 @@ const (
 var tabNames = []string{"Request", "Stream", "Result"}
 
 type model struct {
-	sess    *agent.Session
-	logPath string
-	yolo    bool
+	sess *agent.Session
+	opts Options
+	// modelID is our copy of sess.Agent.Model. The UI reads it, and only ModelChanged writes it,
+	// so View never reads a field that a command goroutine writes.
+	modelID string
 
 	width, height int
 	ready         bool
@@ -118,15 +138,26 @@ type model struct {
 	detailTab tab
 	detailVP  viewport.Model
 
+	// Full screen views. At most one is open. The detail view above is the third one.
+	picker     *picker
+	page       string             // title of the /context or /usage view, "" when closed
+	pageRender func(w int) string // builds the page again when the width changes
+	pageVP     viewport.Model
+
+	models        []llm.ModelInfo // from GET /models, nil until it arrives
+	modelsErr     error
+	modelsLoading bool
+
 	busy       bool
 	cancelTurn context.CancelFunc
 	approval   *approvalMsg
 
 	totalIn, totalOut int
 	totalCost         float64
+	ctxTokens         int // context size after the last call, from its usage block
 }
 
-func newModel(sess *agent.Session, logPath string, yolo bool) *model {
+func newModel(sess *agent.Session, opts Options) *model {
 	in := textinput.New()
 	in.Prompt = "> "
 	in.Placeholder = "Ask the agent. Enter sends."
@@ -135,20 +166,21 @@ func newModel(sess *agent.Session, logPath string, yolo bool) *model {
 
 	a := sess.Agent
 	m := &model{
-		sess: sess, logPath: logPath, yolo: yolo,
-		input: in, chat: viewport.New(0, 0), detailVP: viewport.New(0, 0),
+		sess: sess, opts: opts, modelID: sess.Agent.Model,
+		input: in, chat: viewport.New(0, 0), detailVP: viewport.New(0, 0), pageVP: viewport.New(0, 0),
 		curText: -1, curReasoning: -1, sel: -1, follow: true,
 	}
 	m.chat.MouseWheelEnabled = true
 	m.detailVP.MouseWheelEnabled = true
+	m.pageVP.MouseWheelEnabled = true
 	m.entries = []entry{
 		{kindInfo, fmt.Sprintf("agent %s (%s) · model %s", a.Name, a.Source, a.Model)},
 		{kindInfo, fmt.Sprintf("tools: %s", strings.Join(a.Tools, ", "))},
 		{kindInfo, "project instructions: " + instructionsLabel()},
-		{kindInfo, "log: " + logPath},
+		{kindInfo, "log: " + opts.LogPath},
 		{kindInfo, "/: commands · tab: switch to the API calls pane · click a call to inspect it · esc: stop the agent · ctrl+c: quit"},
 	}
-	if yolo {
+	if opts.Yolo {
 		m.entries = append(m.entries, entry{kindInfo, "--yolo: bash and edit_file run without asking"})
 	}
 	return m
@@ -162,7 +194,8 @@ func instructionsLabel() string {
 	return "none (no AGENTS.md or CLAUDE.md)"
 }
 
-func (m *model) Init() tea.Cmd { return textinput.Blink }
+// Init loads the model list in the background, so /model and the context limit are ready when needed.
+func (m *model) Init() tea.Cmd { return tea.Batch(textinput.Blink, m.fetchModels()) }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -175,7 +208,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case approvalMsg:
+		// The prompt is in the main view, so close any full screen view.
 		m.approval = &msg
+		m.detail, m.picker, m.page = false, nil, ""
+		m.input.Focus()
+		return m, nil
+	case modelsMsg:
+		m.models, m.modelsErr, m.modelsLoading = msg.models, msg.err, false
+		if m.picker != nil {
+			m.picker.refresh(m)
+		}
+		return m, nil
+	case usageMsg:
+		m.openUsage(msg)
+		return m, nil
+	case errMsg:
+		m.entries = append(m.entries, entry{kindError, msg.err.Error()})
+		m.refreshChat()
 		return m, nil
 	case agent.Event:
 		m.handleEvent(msg)
@@ -208,9 +257,15 @@ func (m *model) handleEvent(e agent.Event) {
 			c.res, c.err, c.done = e.Result, e.Err, true
 		}
 		if e.Result != nil && e.Result.Usage != nil {
-			m.totalIn += e.Result.Usage.PromptTokens
-			m.totalOut += e.Result.Usage.CompletionTokens
-			m.totalCost += e.Result.Usage.Cost
+			u := e.Result.Usage
+			m.totalIn += u.PromptTokens
+			m.totalOut += u.CompletionTokens
+			m.totalCost += u.Cost
+			// The answer joins the context too. Reasoning does not: we do not send it back.
+			m.ctxTokens = u.PromptTokens + u.CompletionTokens
+			if d := u.CompletionTokensDetails; d != nil {
+				m.ctxTokens -= d.ReasoningTokens
+			}
 		}
 	case agent.ToolStarted:
 		m.entries = append(m.entries, entry{kindTool, e.Name + " " + e.Args})
@@ -224,6 +279,11 @@ func (m *model) handleEvent(e agent.Event) {
 		m.busy = false
 		m.entries = []entry{{kindInfo, "── context cleared · the next message starts a new conversation ──"}}
 		m.curText, m.curReasoning = -1, -1
+		m.ctxTokens = 0
+	case agent.ModelChanged:
+		m.busy = false
+		m.modelID = e.To
+		m.entries = append(m.entries, entry{kindInfo, fmt.Sprintf("model: %s → %s", e.From, e.To)})
 	case agent.TurnDone:
 		m.busy, m.cancelTurn, m.approval = false, nil, nil
 		switch {
@@ -267,6 +327,20 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.approval = nil
 		}
 		return m, nil
+	}
+
+	if m.picker != nil {
+		return m, m.pickerKey(k)
+	}
+	if m.page != "" {
+		switch k.String() {
+		case "esc", "q":
+			m.page = ""
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.pageVP, cmd = m.pageVP.Update(k)
+		return m, cmd
 	}
 
 	if m.detail {
@@ -372,6 +446,19 @@ func (m *model) afterInput() {
 }
 
 func (m *model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.picker != nil {
+		if ev.Button == tea.MouseButtonWheelUp {
+			m.picker.move(-1, m.pickerRows())
+		} else if ev.Button == tea.MouseButtonWheelDown {
+			m.picker.move(1, m.pickerRows())
+		}
+		return m, nil
+	}
+	if m.page != "" {
+		var cmd tea.Cmd
+		m.pageVP, cmd = m.pageVP.Update(ev)
+		return m, cmd
+	}
 	if m.detail {
 		var cmd tea.Cmd
 		m.detailVP, cmd = m.detailVP.Update(ev)
@@ -496,6 +583,15 @@ func (m *model) layout() {
 	m.input.Width = max(m.width-8, 10)
 	m.detailVP.Width = m.width
 	m.detailVP.Height = max(m.height-3, 1)
+	m.pageVP.Width = m.width
+	m.pageVP.Height = max(m.height-3, 1)
+	if m.page != "" {
+		m.pageVP.SetContent(m.pageRender(m.width))
+	}
+	if m.picker != nil {
+		m.picker.filter.Width = max(m.width-6, 10)
+		m.picker.keepVisible(m.pickerRows())
+	}
 	m.keepSelVisible()
 	m.refreshChat()
 	if m.detail {

@@ -2,7 +2,7 @@
 
 `rig` is a small coding agent in Go. It talks to the OpenRouter chat completions API with plain `net/http` and streaming (SSE).
 The goal is learning, so the code stays small and readable, and the TUI shows every raw API call.
-`README.md` has the user guide. `PLAN.md` has the design and its decisions.
+`README.md` has the user guide.
 
 ## Commands
 
@@ -24,7 +24,9 @@ Real API calls need `OPENROUTER_API_KEY` and cost money. Use the unit tests firs
   The system prompt also gets `AGENTS.md` from the working directory, or `CLAUDE.md` when there is no `AGENTS.md`.
 - `internal/tools`: `read_file`, `list_files`, `edit_file`, `bash`, `code_search`. Each has a hand-written JSON Schema string.
 - `internal/tui`: Bubble Tea v1 UI. `tui.go` has state and input, `view.go` has rendering.
-- `internal/jsonl`: session log in `~/.rig/logs/<time>.jsonl`.
+  `commands.go` has the slash commands, `picker.go` the `/model` view, `pages.go` the `/context` and `/usage` views.
+- `internal/jsonl`: session log in `~/.rig/logs/<time>.jsonl`, and `Summarize` for `/usage`.
+- `internal/state`: `~/.rig/state.json` (recent models, smart zone size). Rig writes it, users write agent files.
 - `embed.go`: embeds `.rig/agents/*.md`, so `rig` works in any directory.
 
 ## Rules
@@ -44,6 +46,8 @@ Real API calls need `OPENROUTER_API_KEY` and cost money. Use the unit tests firs
   Every line in a pane must fit on one screen row. Truncate with `ansi.Truncate`, and replace tabs before you measure width.
 - Never call a `Session` method that emits events from inside `Update`. `Emit` calls `p.Send`, which blocks there.
   Run it in a `tea.Cmd`, and update the UI when the event arrives (see `cmdClear`).
+- The agent goroutine writes `sess.Messages` and `sess.Agent.Model`. The UI reads them only when `busy` is false,
+  and keeps its own copy of the model (`modelID`, updated by `ModelChanged`). `go test -race ./...` checks this.
 - `internal/tui/tui_test.go` checks the layout at 3 terminal sizes (`checkFits`). Add cases there for new UI.
 - To drive the real TUI in a pseudo-terminal, the test must answer the startup queries `ESC]11;?` (background color)
   and `ESC[6n` (cursor position). If it does not, Lip Gloss reads the typed keys as the answer.

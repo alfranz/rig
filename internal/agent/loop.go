@@ -75,6 +75,14 @@ func (s *Session) Reset() {
 	s.Emit(Cleared{At: time.Now()})
 }
 
+// SetModel changes the model for the next request.
+// Do not call it while Send runs: the loop reads the model for each request.
+func (s *Session) SetModel(id string) {
+	from := s.Agent.Model
+	s.Agent.Model = id
+	s.Emit(ModelChanged{From: from, To: id, At: time.Now()})
+}
+
 // call sends one request with the whole conversation and streams the answer.
 func (s *Session) call(ctx context.Context) (llm.Message, error) {
 	s.calls++

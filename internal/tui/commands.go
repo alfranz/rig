@@ -17,6 +17,9 @@ type command struct {
 }
 
 var commands = []command{
+	{name: "model", aliases: []string{"models"}, help: "pick the model for the next request", run: (*model).cmdModel},
+	{name: "context", help: "show what fills the context window", run: (*model).cmdContext},
+	{name: "usage", help: "cost per day and per model, from all logs", run: (*model).cmdUsage},
 	{name: "clear", help: "start a new conversation, keep the system prompt", run: (*model).cmdClear},
 	{name: "exit", aliases: []string{"quit"}, help: "quit rig", run: (*model).cmdExit},
 }
@@ -50,18 +53,14 @@ func (m *model) runCommand(text string) tea.Cmd {
 	name, _, _ := strings.Cut(strings.TrimPrefix(text, "/"), " ")
 	c, ok := findCommand(name)
 	if !ok {
-		m.entries = append(m.entries, entry{kindError, "unknown command /" + name + " · type / to see the commands"})
-		m.refreshChat()
-		return nil
+		return m.errorEntry("unknown command /" + name + " · type / to see the commands")
 	}
 	return c.run(m)
 }
 
 func (m *model) cmdClear() tea.Cmd {
 	if m.busy {
-		m.entries = append(m.entries, entry{kindError, "/clear: the agent is working · press esc first"})
-		m.refreshChat()
-		return nil
+		return m.errorEntry("/clear: the agent is working · press esc first")
 	}
 	// Reset emits an event, and the program cannot take a message while Update runs. So run it as a command.
 	// busy stays on until the Cleared event arrives, so no turn can start in between.

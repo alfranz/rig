@@ -113,3 +113,31 @@ func TestStreamErrorChunk(t *testing.T) {
 		t.Errorf("partial content = %q", res.Message.Content)
 	}
 }
+
+func TestModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/models" {
+			t.Errorf("got %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[{"id":"a/b","name":"A: B","context_length":200000,"pricing":{"prompt":"0.000003","completion":"0.000015"}},
+			{"id":"openrouter/auto","context_length":2000000,"pricing":{"prompt":"-1","completion":"-1"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient("k")
+	c.BaseURL = srv.URL
+
+	models, err := c.Models(context.Background())
+	if err != nil || len(models) != 2 {
+		t.Fatalf("models = %+v, err = %v", models, err)
+	}
+	m := models[0]
+	if m.ID != "a/b" || m.ContextLength != 200000 {
+		t.Errorf("model = %+v", m)
+	}
+	if p, ok := PerMillion(m.Pricing.Prompt); !ok || p < 2.999 || p > 3.001 {
+		t.Errorf("prompt price = %v, %v", p, ok)
+	}
+	if _, ok := PerMillion(models[1].Pricing.Prompt); ok {
+		t.Error("-1 should not be a valid price")
+	}
+}

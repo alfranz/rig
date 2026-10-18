@@ -2,7 +2,7 @@
 
 # rig
 
-~2,300 lines of Go · no SDKs · every API call on screen
+~3,200 lines of Go · no SDKs · every API call on screen
 
 </div>
 
@@ -32,7 +32,7 @@ rig -raw "hello"           # one request: the JSON out, every raw line back
 | Flag | |
 |---|---|
 | `-agent <name>` | agent file to use (default `general`) |
-| `-model <id>` | any OpenRouter model id; overrides the agent file |
+| `-model <id>` | any OpenRouter model id; overrides `/model` and the agent file |
 | `-yolo` | run `bash` and `edit_file` without asking |
 | `-log-dir <dir>` | where session logs go (default `~/.rig/logs`) |
 
@@ -46,8 +46,22 @@ rig -raw "hello"           # one request: the JSON out, every raw line back
 | `1` `2` `3` | request · stream · result |
 | `y` `n` | allow or deny a tool call |
 | `esc` | stop the agent, or close the detail view |
-| `/` | commands: `/clear`, `/exit` |
 | `ctrl+c` | quit |
+
+## Commands
+
+Type `/` to open the menu.
+
+| | |
+|---|---|
+| `/model` | pick a model from the live OpenRouter list |
+| `/context` | see what fills the context window |
+| `/usage` | cost per day and per model, from all logs |
+| `/clear` | start a new conversation |
+| `/exit` | quit |
+
+`/model` saves your pick in `~/.rig/state.json`, and the next start uses it.
+`/context` measures against a 200k token "smart zone". Change it with `smart_zone_tokens` in the same file.
 
 ## Agents
 
@@ -82,7 +96,8 @@ internal/llm     API types, HTTP + SSE client, streamed tool calls
 internal/agent   agent files, the loop, events
 internal/tools   5 tools, hand-written JSON Schemas
 internal/tui     Bubble Tea UI
-internal/jsonl   session log
+internal/jsonl   session log, /usage totals
+internal/state   ~/.rig/state.json
 ```
 
 <br>

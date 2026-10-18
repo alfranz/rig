@@ -42,7 +42,12 @@ func (m *model) View() string {
 	if !m.ready {
 		return "starting…"
 	}
-	if m.detail {
+	switch {
+	case m.picker != nil:
+		return m.viewPicker()
+	case m.page != "":
+		return m.viewPage()
+	case m.detail:
 		return m.viewDetail()
 	}
 	chatW, topH := m.chatWidth(), m.topHeight()
@@ -152,8 +157,9 @@ func (m *model) viewStatus() string {
 	case m.busy:
 		state = "working… esc stops"
 	}
-	left := fmt.Sprintf(" %s · %s · %d calls · in %s  out %s · $%.4f",
-		m.sess.Agent.Name, m.sess.Agent.Model, len(m.calls), num(m.totalIn), num(m.totalOut), m.totalCost)
+	zone, _ := m.smartZone()
+	left := fmt.Sprintf(" %s · %s · ctx %s/%s · %d calls · in %s  out %s · $%.4f",
+		m.sess.Agent.Name, m.modelID, short(m.ctxTokens), short(zone), len(m.calls), num(m.totalIn), num(m.totalOut), m.totalCost)
 	right := state + " "
 	gap := max(m.width-ansi.StringWidth(left)-ansi.StringWidth(right), 1)
 	return statusStyle.Render(ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, ""))

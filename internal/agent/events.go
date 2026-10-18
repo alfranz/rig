@@ -66,6 +66,12 @@ type Cleared struct {
 	At time.Time
 }
 
+// ModelChanged: the user picked another model. The next request uses To.
+type ModelChanged struct {
+	From, To string
+	At       time.Time
+}
+
 func (CallStarted) isEvent()    {}
 func (StreamLine) isEvent()     {}
 func (TextDelta) isEvent()      {}
@@ -75,3 +81,4 @@ func (ToolStarted) isEvent()    {}
 func (ToolFinished) isEvent()   {}
 func (TurnDone) isEvent()       {}
 func (Cleared) isEvent()        {}
+func (ModelChanged) isEvent()   {}
